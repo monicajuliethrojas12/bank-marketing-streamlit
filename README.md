@@ -1,7 +1,7 @@
 # Bank Marketing: priorización de llamadas para depósitos a plazo
 
 Aplicación Streamlit del proyecto integrador de Analítica de Datos 2 (Universidad Industrial de Santander).
-Integra el análisis exploratorio, el PCA, la regresión lineal múltiple y los modelos de clasificación
+Integra el análisis exploratorio, el PCA, el agrupamiento K-means, la regresión lineal múltiple y los modelos de clasificación
 (regresión logística, árbol de decisión y Random Forest) del informe técnico, y permite descargar las
 tablas de predicciones.
 
@@ -44,6 +44,7 @@ streamlit run app.py
 
 - Preparación: eliminación de duplicados, filas con menos del 80 % de datos e imputación con mediana o moda
   (sin efecto en `bank-full.csv`). `duration` se excluye de los modelos por fuga de información.
+- K-means: age, balance, duration y campaign con Yeo-Johnson y estandarización; k = 4, n_init = 10, semilla 42 (punto 6).
 - Regresión lineal: partición aleatoria 80/20, semilla 42.
 - Regresión logística: partición estratificada 80/20, semilla 1234 en el informe (secciones 8 y 9.2).
 - Árbol de decisión y Random Forest: partición estratificada 80/20, semilla 42 (sección 10).
