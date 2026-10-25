@@ -22,7 +22,10 @@ from sklearn.metrics import (average_precision_score, confusion_matrix,
 from sklearn.model_selection import (StratifiedKFold, cross_val_predict,
                                      train_test_split)
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
+from sklearn.preprocessing import (MinMaxScaler, OneHotEncoder, PowerTransformer, RobustScaler,
+                                   StandardScaler)
 from sklearn.tree import DecisionTreeClassifier
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,9 @@ VALORES_INFORME = [
     ("10", ARBOL_PODADO, 42, "Verdaderos positivos (umbral 0,5)", 629, 0),
     ("10", RANDOM_FOREST, 42, "ROC-AUC", 0.803, 3),
     ("10", RANDOM_FOREST, 42, "PR-AUC", 0.455, 3),
+    ("6", "K-means (k = 4)", 42, "Silhouette promedio (k = 4)", 0.210, 3),
+    ("6", "K-means (k = 4)", 42, "Clientes en el clúster 0", 11939, 0),
+    ("6", "K-means (k = 4)", 42, "Clientes en el clúster 1", 12706, 0),
 ]
 
 
@@ -519,6 +525,135 @@ def resultados_pca(datos, minimo_varianza=80):
 
 
 # ---------------------------------------------------------------------------
+# K-means (punto 6)
+# ---------------------------------------------------------------------------
+VARIABLES_KMEANS = ["age", "balance", "duration", "campaign"]   # entran al agrupamiento
+EXTRA_PERFIL_KMEANS = ["pdays", "previous"]                     # solo describen los perfiles
+CATEGORICAS_PERFIL = ["job", "marital", "education", "housing", "loan", "poutcome", "y"]
+K_MIN, K_MAX, K_FINAL = 2, 8, 4
+N_INIT_KMEANS = 10
+MUESTRA_SILUETA = 10000
+
+
+def matriz_kmeans(datos, variables=None):
+    """Yeo-Johnson con estandarización, como en el punto 6."""
+    variables = variables or VARIABLES_KMEANS
+    return PowerTransformer(method="yeo-johnson", standardize=True).fit_transform(datos[variables])
+
+
+def silueta(X, etiquetas, semilla=42):
+    return float(silhouette_score(X, etiquetas, sample_size=min(MUESTRA_SILUETA, len(X)), random_state=semilla))
+
+
+def curva_k(datos, semilla=42):
+    """Inercia (Elbow) y silhouette promedio para k entre 2 y 8."""
+    X = matriz_kmeans(datos)
+    filas = []
+    for k in range(K_MIN, K_MAX + 1):
+        km = KMeans(n_clusters=k, n_init=N_INIT_KMEANS, random_state=semilla).fit(X)
+        filas.append({"k": k, "Inercia": float(km.inertia_), "Silhouette": silueta(X, km.labels_, semilla)})
+    tabla = pd.DataFrame(filas)
+    segunda = np.diff(tabla["Inercia"].to_numpy(), 2)
+    k_codo = int(tabla["k"].iloc[int(np.argmax(segunda)) + 1]) if len(segunda) else None
+    k_sil = int(tabla.loc[tabla["Silhouette"].idxmax(), "k"])
+    return {"tabla": tabla, "k_codo": k_codo, "k_silhouette": k_sil}
+
+
+def kmeans_final(datos, k=K_FINAL, semilla=42):
+    """Modelo final, silhouette por observación, tamaños y perfiles en variables originales."""
+    X = matriz_kmeans(datos)
+    etiquetas = KMeans(n_clusters=k, n_init=N_INIT_KMEANS, random_state=semilla).fit(X).labels_
+    rng = np.random.RandomState(semilla)
+    idx = rng.choice(len(X), size=min(5000, len(X)), replace=False)
+    sil_i = silhouette_samples(X[idx], etiquetas[idx])
+    lab_s = etiquetas[idx]
+
+    tam = pd.Series(etiquetas).value_counts().sort_index()
+    tamanos = pd.DataFrame({
+        "Clúster": tam.index, "Clientes": tam.to_numpy(), "Porcentaje (%)": (tam / tam.sum() * 100).to_numpy(),
+        "Silhouette promedio": pd.Series(sil_i).groupby(lab_s).mean().reindex(tam.index).to_numpy(),
+    })
+
+    perfil = datos[VARIABLES_KMEANS + EXTRA_PERFIL_KMEANS].copy()
+    perfil["pdays"] = perfil["pdays"].where(perfil["pdays"] >= 0, 0)   # -1 = sin contacto previo
+    perfil["cluster"] = etiquetas
+    variables = VARIABLES_KMEANS + EXTRA_PERFIL_KMEANS
+    media_global = perfil[variables].mean()
+    medias = perfil.groupby("cluster")[variables].mean()
+    medianas = perfil.groupby("cluster")[variables].median()
+    indice = (medias / media_global - 1) * 100
+    dif_std = (medias - media_global) / perfil[variables].std()
+
+    contrato = datos["y"].eq("yes").to_numpy() if "y" in datos.columns else None
+    if contrato is not None:
+        tamanos["Tasa de contratación (%)"] = (pd.Series(contrato).groupby(etiquetas).mean()
+                                               .reindex(tam.index).to_numpy() * 100)
+    categoricas = {c: pd.crosstab(etiquetas, datos[c].to_numpy(), normalize="index") * 100
+                   for c in CATEGORICAS_PERFIL if c in datos.columns}
+    asignacion = datos[VARIABLES_KMEANS + EXTRA_PERFIL_KMEANS].copy()
+    asignacion.insert(0, "id_registro", datos.index.to_numpy())
+    asignacion["cluster"] = etiquetas
+    if contrato is not None:
+        asignacion["y"] = datos["y"].to_numpy()
+    return {
+        "k": k, "etiquetas": etiquetas, "X": X, "sil_obs": sil_i, "lab_obs": lab_s,
+        "silhouette_promedio": float(sil_i.mean()), "tamanos": tamanos,
+        "medias": medias.T.assign(Global=media_global), "medianas": medianas.T.assign(Global=perfil[variables].median()),
+        "indice": indice, "dif_std": dif_std, "categoricas": categoricas, "asignacion": asignacion.reset_index(drop=True),
+    }
+
+
+def sensibilidad_kmeans(datos, etiquetas, k=K_FINAL, semilla=42, n_semillas=30):
+    """Sensibilidad a la inicialización, al escalado y a cada variable (punto 6)."""
+    X = matriz_kmeans(datos)
+    ari, inercias = [], []
+    for s in range(n_semillas):
+        km = KMeans(n_clusters=k, n_init=1, random_state=s).fit(X)
+        ari.append(adjusted_rand_score(etiquetas, km.labels_))
+        inercias.append(km.inertia_)
+    semillas = {"ARI medio": float(np.mean(ari)), "ARI mínimo": float(np.min(ari)),
+                "Inercia mínima": float(np.min(inercias)), "Inercia máxima": float(np.max(inercias))}
+    escalados = []
+    for nombre, escalador in [("Estándar (sin transformar)", StandardScaler()), ("Robust", RobustScaler()),
+                              ("MinMax", MinMaxScaler())]:
+        Xs = escalador.fit_transform(datos[VARIABLES_KMEANS])
+        lab = KMeans(n_clusters=k, n_init=N_INIT_KMEANS, random_state=semilla).fit_predict(Xs)
+        escalados.append({"Preprocesamiento": nombre, "ARI frente a Yeo-Johnson": adjusted_rand_score(etiquetas, lab),
+                          "Silhouette": silueta(Xs, lab, semilla)})
+    variables = []
+    for v in VARIABLES_KMEANS:
+        otras = [c for c in VARIABLES_KMEANS if c != v]
+        Xv = matriz_kmeans(datos, otras)
+        lab = KMeans(n_clusters=k, n_init=N_INIT_KMEANS, random_state=semilla).fit_predict(Xv)
+        variables.append({"Variable retirada": v, "ARI frente a la solución base": adjusted_rand_score(etiquetas, lab),
+                          "Silhouette": silueta(Xv, lab, semilla)})
+    return {"semillas": semillas, "ari_semillas": np.array(ari), "escalado": pd.DataFrame(escalados),
+            "variables": pd.DataFrame(variables)}
+
+
+def estabilidad_kmeans(datos, etiquetas, k=K_FINAL, semilla=42, remuestreos=20, fraccion=0.8):
+    """Remuestreo del 80 %: ARI frente a la solución base y Jaccard por clúster."""
+    X = matriz_kmeans(datos)
+    rng = np.random.RandomState(semilla)
+    n = len(X)
+    ari, jaccard = [], {c: [] for c in range(k)}
+    for b in range(remuestreos):
+        idx = rng.choice(n, size=int(fraccion * n), replace=False)
+        lab_b = KMeans(n_clusters=k, n_init=N_INIT_KMEANS, random_state=b).fit(X[idx]).predict(X)
+        ari.append(adjusted_rand_score(etiquetas, lab_b))
+        for c in range(k):
+            A = etiquetas == c
+            jaccard[c].append(max((A & (lab_b == c2)).sum() / (A | (lab_b == c2)).sum() for c2 in range(k)))
+    ari = np.array(ari)
+    tabla = pd.DataFrame({"Clúster": list(jaccard), "Jaccard medio": [float(np.mean(v)) for v in jaccard.values()]})
+    tabla["Estabilidad"] = np.select([tabla["Jaccard medio"] > 0.75, tabla["Jaccard medio"] >= 0.6],
+                                     ["Estable", "Moderada"], default="Inestable")
+    return {"ari": ari, "ari_medio": float(ari.mean()), "ic95": (float(np.percentile(ari, 2.5)),
+                                                                   float(np.percentile(ari, 97.5))),
+            "jaccard": tabla}
+
+
+# ---------------------------------------------------------------------------
 # Integración de resultados (sección 11)
 # ---------------------------------------------------------------------------
 def comparar_clasificadores(datos, nombres=None, semilla=42, prop_prueba=0.2,
@@ -556,10 +691,20 @@ def verificar_reproducibilidad(datos, resultados_previos=None):
 
     lineal = {"Regresión lineal (completa)": entrenar_regresion(datos, "Completo", 42)["metricas"],
               "Regresión lineal (reducida)": entrenar_regresion(datos, "Reducido", 42)["metricas"]}
+    agrupamiento = None
     filas = []
     for seccion, modelo, semilla, medida, publicado, decimales in VALORES_INFORME:
         if modelo in lineal:
             valor = lineal[modelo][medida]
+        elif modelo.startswith("K-means"):
+            if agrupamiento is None:
+                agrupamiento = kmeans_final(datos, K_FINAL, semilla)
+                curva = curva_k(datos, semilla)["tabla"].set_index("k")
+            if medida.startswith("Silhouette"):
+                valor = curva.loc[K_FINAL, "Silhouette"]
+            else:
+                cluster = int(medida.rsplit(" ", 1)[-1])
+                valor = agrupamiento["tamanos"].set_index("Clúster").loc[cluster, "Clientes"]
         else:
             r = clasificador(modelo, semilla)
             if medida == "Umbral por costo":

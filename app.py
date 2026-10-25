@@ -49,12 +49,14 @@ MODULOS = [
     "Inicio",
     "Carga y análisis de datos",
     "Análisis de componentes principales",
+    "Agrupamiento K-means",
     "Regresión lineal múltiple",
     "Modelos de clasificación",
     "Comparación y priorización",
     "Predicción de nuevos clientes",
     "Reproducibilidad y despliegue",
 ]
+COLORES_CLUSTER = [AZUL, NARANJA, AQUA, "#eda100", "#e87ba4", "#008300", "#6250d6", ROJO]
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +133,26 @@ def regresion_entrenada(clave, especificacion, semilla, prop_prueba, _datos):
 @st.cache_data(show_spinner=False)
 def pca_calculado(clave, minimo, _datos):
     return mdl.resultados_pca(_datos, minimo)
+
+
+@st.cache_data(show_spinner=False)
+def curva_k_calculada(clave, _datos):
+    return mdl.curva_k(_datos)
+
+
+@st.cache_resource(show_spinner=False, max_entries=8)
+def kmeans_calculado(clave, k, _datos):
+    return mdl.kmeans_final(_datos, k)
+
+
+@st.cache_resource(show_spinner=False, max_entries=8)
+def sensibilidad_calculada(clave, k, _datos, _etiquetas):
+    return mdl.sensibilidad_kmeans(_datos, _etiquetas, k)
+
+
+@st.cache_resource(show_spinner=False, max_entries=8)
+def estabilidad_calculada(clave, k, remuestreos, _datos, _etiquetas):
+    return mdl.estabilidad_kmeans(_datos, _etiquetas, k, remuestreos=remuestreos)
 
 
 def obtener_clasificador(nombre):
@@ -212,6 +234,64 @@ def fig_cargas(cargas):
                 linecolor="white", cbar_kws={"label": "Carga"}, ax=ax)
     ax.set_title("Cargas de las componentes retenidas", loc="left")
     ax.grid(False)
+    fig.tight_layout()
+    return fig
+
+
+def fig_curva_k(tabla, k_elegido):
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 3.9))
+    ejes[0].plot(tabla["k"], tabla["Inercia"], marker="o", markersize=8, color=AZUL)
+    ejes[0].set(title="Método del codo (Elbow)", xlabel="Número de clústeres (k)", ylabel="Inercia (WCSS)")
+    ejes[1].plot(tabla["k"], tabla["Silhouette"], marker="o", markersize=8, color=AQUA)
+    ejes[1].set(title="Silhouette promedio", xlabel="Número de clústeres (k)", ylabel="Silhouette")
+    for ax in ejes:
+        ax.axvline(k_elegido, color=NARANJA, linestyle="--", linewidth=1.5, label=f"k elegido = {k_elegido}")
+        ax.set_xticks(tabla["k"])
+        ax.legend(loc="best")
+    fig.tight_layout()
+    return fig
+
+
+def fig_silueta_obs(sil, lab, k):
+    fig, ax = plt.subplots(figsize=(7, 4.6))
+    y0 = 0
+    for c in range(k):
+        v = np.sort(sil[lab == c])
+        ax.fill_betweenx(np.arange(y0, y0 + len(v)), 0, v, color=COLORES_CLUSTER[c % 8], alpha=0.85, linewidth=0)
+        ax.text(-0.06, y0 + len(v) / 2, str(c), va="center", fontsize=9, color=TINTA_2)
+        y0 += len(v) + 40
+    ax.axvline(sil.mean(), color=ROJO, linestyle="--", linewidth=1.5, label=f"Promedio = {num(sil.mean(), 3)}")
+    ax.set(title="Silhouette por observación y clúster (submuestra de 5.000)", xlabel="Silhouette", yticks=[])
+    ax.grid(axis="y", visible=False)
+    ax.legend(loc="lower right")
+    fig.tight_layout()
+    return fig
+
+
+def fig_tamanos(tamanos):
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    colores = [COLORES_CLUSTER[int(c) % 8] for c in tamanos["Clúster"]]
+    ax.bar(tamanos["Clúster"].astype(str), tamanos["Clientes"], color=colores, width=0.6)
+    for i, (n_, p_) in enumerate(zip(tamanos["Clientes"], tamanos["Porcentaje (%)"])):
+        ax.text(i, n_, f"{num(n_, 0)}\n({num(p_, 1)} %)", ha="center", va="bottom", fontsize=8, color=TINTA_2)
+    ax.set(title="Tamaño de cada clúster", xlabel="Clúster", ylabel="Clientes", ylim=(0, tamanos["Clientes"].max() * 1.25))
+    ax.grid(axis="x", visible=False)
+    fig.tight_layout()
+    return fig
+
+
+def fig_perfiles(indice, dif_std):
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 3.9))
+    limite = max(abs(indice.values).max(), 1)
+    sns.heatmap(indice.T, annot=True, fmt=".0f", cmap=DIVERGENTE, vmin=-limite, vmax=limite, linewidths=2,
+                linecolor="white", cbar_kws={"label": "% frente a la media global"}, ax=ejes[0])
+    ejes[0].set_title("Desviación porcentual respecto a la media global", loc="left")
+    sns.heatmap(dif_std.T, annot=True, fmt=".2f", cmap=DIVERGENTE, vmin=-1.5, vmax=1.5, linewidths=2,
+                linecolor="white", cbar_kws={"label": "Desviaciones estándar"}, ax=ejes[1])
+    ejes[1].set_title("Diferencia estandarizada", loc="left")
+    for ax in ejes:
+        ax.grid(False)
+        ax.set_xlabel("Clúster")
     fig.tight_layout()
     return fig
 
@@ -428,6 +508,8 @@ def modulo_inicio():
         "- **Carga y análisis de datos:** primeras filas, estadísticas descriptivas, tipos de datos, faltantes, "
         "histogramas, gráficos de barras, matriz de correlación y diccionario de datos.\n"
         "- **Análisis de componentes principales:** varianza explicada, criterio de retención y cargas.\n"
+        "- **Agrupamiento K-means:** Elbow, silhouette, tamaño y perfiles de los clústeres, sensibilidad y "
+        "estabilidad.\n"
         "- **Regresión lineal múltiple:** modelo completo y reducido para el saldo, con diagnóstico de residuos.\n"
         "- **Modelos de clasificación:** regresión logística, árbol de decisión y Random Forest, con matriz de "
         "confusión, reporte de clasificación, curvas ROC y de precisión-sensibilidad y umbral por costo.\n"
@@ -518,6 +600,131 @@ def modulo_pca():
         "de forma pareja entre componentes, lo que indica correlaciones bajas entre las variables originales.")
     st.caption("Las cargas describen cómo se combinan las variables; no indican causalidad ni seleccionan "
                "variables para los modelos predictivos.")
+
+
+def modulo_kmeans():
+    st.header("Agrupamiento con K-means")
+    with st.expander("Cómo funciona K-means", expanded=False):
+        st.markdown(
+            "K-means divide a los clientes en k grupos. Empieza con k centros (centroides), asigna cada cliente al "
+            "centro más cercano y recalcula cada centro como el promedio de sus clientes, hasta que las "
+            "asignaciones no cambian. Busca minimizar la inercia, que es la suma de las distancias al cuadrado de "
+            "cada cliente a su centroide:")
+        st.latex(r"\text{Inercia} = \sum_{j=1}^{k} \sum_{x_i \in C_j} \lVert x_i - \mu_j \rVert^2")
+        st.markdown(
+            "El coeficiente silhouette compara, para cada cliente, la distancia media a su propio grupo (a) con la "
+            "del grupo vecino más cercano (b): s = (b − a) / máx(a, b). Va de −1 a 1; valores cercanos a 1 indican "
+            "grupos bien separados y cercanos a 0, clientes en la frontera entre dos grupos.")
+    st.markdown(
+        "Se agrupa con `age`, `balance`, `duration` y `campaign`, transformadas con Yeo-Johnson y estandarizadas, "
+        "porque son muy asimétricas y, sin transformar, unos pocos clientes con saldos o contactos extremos "
+        "definirían los grupos. Las variables categóricas, `pdays` y `previous` no entran al agrupamiento; solo "
+        "describen los perfiles. Se usan 10 reinicios (n_init = 10) y semilla 42.")
+    k = st.slider("Número de clústeres (k)", mdl.K_MIN, mdl.K_MAX, mdl.K_FINAL, 1, key="k_kmeans",
+                  help="El informe usa k = 4.")
+    with st.spinner("Calculando la curva del codo y el silhouette para k entre 2 y 8 (la primera vez tarda cerca de un minuto)..."):
+        curva = curva_k_calculada(CLAVE, DATOS)
+    with st.spinner(f"Ajustando K-means con k = {k}..."):
+        r = kmeans_calculado(CLAVE, k, DATOS)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Codo aproximado", curva["k_codo"])
+    c2.metric("k con mayor silhouette", curva["k_silhouette"])
+    c3.metric(f"Silhouette promedio con k = {k}", num(r["silhouette_promedio"], 3))
+
+    pestanas = st.tabs(["Elbow y silhouette", "Silhouette por clúster", "Tamaño", "Perfiles",
+                        "Sensibilidad", "Estabilidad", "Asignación de clientes"])
+    with pestanas[0]:
+        mostrar_figura(fig_curva_k(curva["tabla"], k))
+        mostrar_tabla(curva["tabla"], decimales=4)
+        st.markdown(
+            "La inercia baja de forma gradual, sin un codo marcado (se aproxima en k = 3), y el silhouette se mantiene "
+            "entre 0,20 y 0,24 para todos los valores de k, con su máximo en k = 8, el límite del rango. Como los dos "
+            "criterios no coinciden, el informe adopta k = 4 como compromiso entre separación e interpretabilidad: "
+            "ocho segmentos serían difíciles de gestionar en una campaña comercial.")
+    with pestanas[1]:
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            mostrar_figura(fig_silueta_obs(r["sil_obs"], r["lab_obs"], k))
+        with col2:
+            st.markdown(
+                "Cada banda es un clúster; su altura es proporcional al número de clientes y su ancho, al silhouette "
+                "de cada cliente. Un silhouette promedio menor que 0,25 indica una estructura débil: los clientes no "
+                "forman grupos naturalmente aislados, sino un continuo con muchos casos de frontera. Los segmentos "
+                "deben leerse como una descripción orientativa de perfiles.")
+    with pestanas[2]:
+        col1, col2 = st.columns([3, 2])
+        with col1:
+            mostrar_figura(fig_tamanos(r["tamanos"]))
+        with col2:
+            mostrar_tabla(r["tamanos"], decimales=3)
+        st.caption("La tasa de contratación de cada clúster no se usó para formarlos; se calcula después, para "
+                   "describir el valor comercial de cada segmento.")
+    with pestanas[3]:
+        mostrar_figura(fig_perfiles(r["indice"], r["dif_std"]))
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Media por clúster (unidades originales)**")
+            st.dataframe(r["medias"].style.format(lambda v: num(v, 2)))
+        with col2:
+            st.markdown("**Mediana por clúster (unidades originales)**")
+            st.dataframe(r["medianas"].style.format(lambda v: num(v, 2)))
+        categoria = st.selectbox("Perfil categórico (% de clientes dentro de cada clúster)",
+                                 list(r["categoricas"]), index=len(r["categoricas"]) - 1, key="cat_kmeans")
+        tabla_cat = r["categoricas"][categoria].copy()
+        tabla_cat.index.name = "Clúster"
+        st.dataframe(tabla_cat.style.format(lambda v: num(v, 1)))
+        if k == mdl.K_FINAL:
+            st.markdown(
+                "**Lectura de los perfiles con k = 4:** el clúster 0 reúne clientes muy contactados (+88 % en "
+                "`campaign`) con llamadas breves (−61 % en `duration`) y casi no contrata (1,4 %); el clúster 1, "
+                "clientes jóvenes (−22 % en edad) con poco saldo y pocos contactos; el clúster 2, conversaciones "
+                "largas (+109 % en duración) y la mayor tasa de contratación (23,3 %); y el clúster 3, clientes de "
+                "mayor edad (+27 %) y mayor saldo (+86 %). La diferencia del clúster 2 se explica en buena parte por "
+                "la duración, que solo se conoce después de la llamada: el agrupamiento describe, no predice.")
+    with pestanas[4]:
+        st.markdown("Pone a prueba la solución frente a cambios en la semilla, el escalado y las variables. "
+                    "El índice de Rand ajustado (ARI) vale 1 si dos agrupamientos son idénticos y cerca de 0 si "
+                    "no se parecen más que por azar.")
+        if st.button("Calcular sensibilidad", key="btn_sensibilidad"):
+            with st.spinner("Ajustando K-means con 30 semillas, 3 escalados y 4 subconjuntos de variables..."):
+                st.session_state[f"sens_{k}"] = sensibilidad_calculada(CLAVE, k, DATOS, r["etiquetas"])
+        s = st.session_state.get(f"sens_{k}")
+        if s is not None:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("ARI medio entre 30 semillas", num(s["semillas"]["ARI medio"], 3))
+            c2.metric("ARI mínimo", num(s["semillas"]["ARI mínimo"], 3))
+            c3.metric("Rango de inercia", f"{num(s['semillas']['Inercia mínima'], 0)} – {num(s['semillas']['Inercia máxima'], 0)}")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Escalado**")
+                mostrar_tabla(s["escalado"])
+            with col2:
+                st.markdown("**Retirando una variable**")
+                mostrar_tabla(s["variables"])
+            st.caption("Con una sola inicialización, algunas semillas llevan a soluciones distintas (ARI mínimo bajo); "
+                       "por eso se usan 10 reinicios. Cambiar el escalado cambia casi por completo los grupos, y "
+                       "retirar duration, campaign o age los altera mucho: son las variables que definen la "
+                       "segmentación, mientras que balance pesa menos.")
+    with pestanas[5]:
+        remuestreos = st.select_slider("Remuestreos del 80 % de los clientes", options=[10, 20, 30, 50], value=20,
+                                       key="remuestreos")
+        if st.button("Calcular estabilidad", key="btn_estabilidad"):
+            with st.spinner(f"Ajustando K-means en {remuestreos} remuestreos..."):
+                st.session_state[f"estab_{k}_{remuestreos}"] = estabilidad_calculada(
+                    CLAVE, k, remuestreos, DATOS, r["etiquetas"])
+        e = st.session_state.get(f"estab_{k}_{remuestreos}")
+        if e is not None:
+            c1, c2 = st.columns(2)
+            c1.metric("ARI medio frente a la solución base", num(e["ari_medio"], 3))
+            c2.metric("Intervalo del 95 %", f"{num(e['ic95'][0], 3)} – {num(e['ic95'][1], 3)}")
+            mostrar_tabla(e["jaccard"])
+            st.caption("Jaccard medio por clúster: mayor que 0,75 es estable, entre 0,60 y 0,75 moderado y menor que "
+                       "0,60 inestable. Un clúster inestable cambia de composición con pequeños cambios en los datos.")
+    with pestanas[6]:
+        st.dataframe(r["asignacion"].head(200), hide_index=True)
+        boton_descarga(r["asignacion"], f"asignacion_clusters_k{k}.csv",
+                       "Descargar la asignación de clústeres (CSV)", "desc_kmeans")
+        st.caption("pdays se muestra con su valor original (-1 = sin contacto previo); en los perfiles se usa 0.")
 
 
 def modulo_regresion():
@@ -859,6 +1066,8 @@ def modulo_reproducibilidad():
     st.header("Reproducibilidad y despliegue")
     st.subheader("Especificaciones de los modelos")
     specs = pd.DataFrame([
+        ("K-means (k = 4)", "age, balance, duration, campaign (Yeo-Johnson y estandarización)",
+         "Todos los registros (no supervisado)", "42", "n_init = 10; k evaluado entre 2 y 8", "No aplica"),
         ("Regresión lineal (reducida)", "age, job, marital, education, default, housing, loan, contact, month",
          "Aleatoria 80/20", "42", "StandardScaler + OneHotEncoder(drop='first') + MCO", "No aplica"),
         (mdl.LOGISTICA_REDUCIDA, ", ".join(mdl.VARIABLES_LOGISTICA["reducida"]), "Estratificada 80/20", "1234 (informe) / 42 (comparación)",
@@ -873,7 +1082,8 @@ def modulo_reproducibilidad():
                "0,01 y 0,99. duration se excluye de todos los modelos.")
 
     st.subheader("Verificación frente al informe técnico")
-    st.markdown("Recalcula las cifras publicadas en las secciones 9 y 10 con las semillas originales.")
+    st.markdown("Recalcula las cifras publicadas en los puntos 6, 9 y 10 con las semillas originales "
+                "(tarda cerca de un minuto).")
     if st.button("Ejecutar verificación", key="verificar"):
         with st.spinner("Recalculando los modelos del informe..."):
             previos = {n: clasificador_entrenado(CLAVE, n, 42, 0.2, DATOS)
@@ -929,6 +1139,7 @@ PAGINAS = {
     "Inicio": modulo_inicio,
     "Carga y análisis de datos": modulo_datos,
     "Análisis de componentes principales": modulo_pca,
+    "Agrupamiento K-means": modulo_kmeans,
     "Regresión lineal múltiple": modulo_regresion,
     "Modelos de clasificación": modulo_clasificacion,
     "Comparación y priorización": modulo_comparacion,
